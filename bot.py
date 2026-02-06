@@ -2,32 +2,52 @@ import os
 import telebot
 from telebot import types
 
-# === НАСТРОЙКИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 QUESTIONS_LIMIT = 10
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# === ХРАНИЛИЩЕ СОСТОЯНИЙ ===
 questions = []
-user_state = {}   # user_id -> {"index": int, "score": int, "active": bool}
+user_state = {}
+
 
 # === ЗАГРУЗКА ВОПРОСОВ ===
 def load_questions_from_file(path):
     loaded = []
+
     with open(path, "r", encoding="utf-8") as f:
         block = []
+
         for line in f:
             line = line.strip()
+
             if not line:
                 if block:
                     loaded.append(block)
                     block = []
             else:
                 block.append(line)
+
         if block:
             loaded.append(block)
+
     return loaded
+
+
+# === ДОСТАТЬ БУКВУ ОТВЕТА ===
+def extract_answer(answer_line):
+    answer_line = answer_line.upper()
+
+    if "A" in answer_line:
+        return "A"
+    if "B" in answer_line:
+        return "B"
+    if "C" in answer_line:
+        return "C"
+    if "D" in answer_line:
+        return "D"
+
+    return ""
 
 
 # === КЛАВИАТУРА ===
@@ -38,7 +58,7 @@ def main_keyboard():
     return kb
 
 
-# === СТАРТ ===
+# === START ===
 @bot.message_handler(commands=["start"])
 def start(message):
     bot.send_message(
@@ -69,11 +89,11 @@ def handle_file(message):
     )
 
 
-# === НАЧАЛО ИГРЫ ===
+# === НАЧАТЬ ИГРУ ===
 @bot.message_handler(func=lambda m: m.text == "▶️ Играть")
 def play(message):
     if not questions:
-        bot.send_message(message.chat.id, "❌ Сначала загрузите файл с вопросами")
+        bot.send_message(message.chat.id, "❌ Сначала загрузите вопросы")
         return
 
     user_state[message.chat.id] = {
@@ -97,18 +117,20 @@ def send_question(chat_id):
     if idx >= QUESTIONS_LIMIT or idx >= len(questions):
         bot.send_message(
             chat_id,
-            f"🏁 Игра окончена!\n\nПравильных ответов: {state['score']} из {QUESTIONS_LIMIT}",
+            f"🏁 Игра окончена!\nПравильных ответов: {state['score']} из {QUESTIONS_LIMIT}",
             reply_markup=main_keyboard()
         )
         state["active"] = False
         return
 
     q = questions[idx]
+
     text = f"❓ {idx+1}/{QUESTIONS_LIMIT}\n\n" + "\n".join(q[:-1]) + "\n\nОтвет: A / B / C / D"
+
     bot.send_message(chat_id, text)
 
 
-# === ОБРАБОТКА ОТВЕТА ===
+# === ОТВЕТ ПОЛЬЗОВАТЕЛЯ ===
 @bot.message_handler(func=lambda m: m.text and m.text.upper() in ["A", "B", "C", "D"])
 def answer(message):
     state = user_state.get(message.chat.id)
@@ -116,7 +138,9 @@ def answer(message):
     if not state or not state["active"]:
         return
 
-    correct = questions[state["index"]][-1].strip().upper()
+    q = questions[state["index"]]
+
+    correct = extract_answer(q[-1])
 
     if message.text.upper() == correct:
         state["score"] += 1
@@ -131,12 +155,11 @@ def answer(message):
     send_question(message.chat.id)
 
 
-# === ЗАГЛУШКА ДЛЯ РЕЙТИНГА ===
+# === РЕЙТИНГ ===
 @bot.message_handler(func=lambda m: m.text == "🏆 Рейтинг")
 def rating(message):
-    bot.send_message(message.chat.id, "🏆 Рейтинг будет добавлен позже 😉")
+    bot.send_message(message.chat.id, "🏆 Рейтинг будет позже 😉")
 
 
-# === ЗАПУСК ===
 print("Bot started")
 bot.infinity_polling(skip_pending=True)
