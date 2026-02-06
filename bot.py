@@ -1,125 +1,183 @@
-import asyncio
-import logging
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, ContentType
-from aiogram.filters import Command
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
+import telebot
+from telebot import types
+import os
+import random
 
 from config import BOT_TOKEN
 
-logging.basicConfig(level=logging.INFO)
+bot = telebot.TeleBot(BOT_TOKEN)
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+# Храним данные пользователей
+user_data = {}
 
-MAX_QUESTIONS = 10
-
-# user_id -> session
-user_sessions = {}
+QUESTIONS_LIMIT = 10
 
 
-def parse_questions(text: str) -> list[str]:
-    return [line.strip() for line in text.splitlines() if line.strip()]
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+
+def parse_questions(file_path):
+    questions = []
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        blocks = f.read().strip().split("\n\n")
+
+    for block in blocks:
+        lines = block.strip().split("\n")
+        if len(lines) < 6:
+            continue
+
+        question_text = lines[0]
+        options = lines[1:5]
+        answer_line = lines[5]
+
+        if not answer_line.upper().startswith("ANSWER:"):
+            continue
+
+        answer = answer_line.split(":")[1].strip().upper()
+
+        questions.append({
+            "text": question_text,
+            "options": options,
+            "answer": answer
+        })
+
+    return questions
 
 
-async def send_next_question(message: Message, user_id: int):
-    session = user_sessions[user_id]
+def send_question(chat_id, user_id):
+    data = user_data[user_id]
+    q = data["questions"][data["current"]]
 
-    # ✅ ЖЁСТКИЙ СТОП
-    if session["current"] >= MAX_QUESTIONS:
-        await message.answer(
-            f"🏁 Игра окончена!\n"
-            f"Вы ответили на {MAX_QUESTIONS} вопросов."
-        )
-        del user_sessions[user_id]
-        return
+    text = f"❓ {q['text']}\n\n"
+    for opt in q["options"]:
+        text += opt + "\n"
 
-    question = session["questions"][session["current"]]
-    session["current"] += 1
+    bot.send_message(chat_id, text)
 
-    await message.answer(
-        f"❓ Вопрос {session['current']} из {MAX_QUESTIONS}:\n\n{question}"
+
+def finish_game(chat_id, user_id):
+    score = user_data[user_id]["score"]
+    bot.send_message(
+        chat_id,
+        f"🏁 Игра окончена!\n\n"
+        f"Твой результат: {score} из {QUESTIONS_LIMIT}\n\n"
+        f"Нажми /start, чтобы сыграть снова"
     )
+    del user_data[user_id]
 
 
-@dp.message(Command("start"))
-async def start(message: Message):
-    kb = ReplyKeyboardBuilder()
-    kb.button(text="▶️ Начать игру")
-    kb.button(text="📄 Загрузить вопросы")
-    kb.adjust(1)
+# ---------- ХЭНДЛЕРЫ ----------
 
-    await message.answer(
-        "Привет! 👋\n"
-        "Квиз-бот.\n"
-        "Игра всегда состоит из 10 вопросов.",
-        reply_markup=kb.as_markup(resize_keyboard=True),
-    )
-
-
-@dp.message(F.content_type == ContentType.DOCUMENT)
-async def handle_file(message: Message):
-    if not message.document.file_name.endswith(".txt"):
-        await message.answer("❌ Нужен файл .txt")
-        return
-
-    file = await bot.get_file(message.document.file_id)
-    content = await bot.download_file(file.file_path)
-    text = content.read().decode("utf-8")
-
-    questions = parse_questions(text)
-
-    if len(questions) < MAX_QUESTIONS:
-        await message.answer(
-            f"❌ В файле только {len(questions)} вопросов.\n"
-            f"Нужно минимум {MAX_QUESTIONS}."
-        )
-        return
-
-    user_sessions[message.from_user.id] = {
-        "questions": questions,
-        "current": 0,
-    }
-
-    await message.answer("✅ Вопросы загружены. Начинаем игру!")
-    await send_next_question(message, message.from_user.id)
-
-
-@dp.message(F.text == "▶️ Начать игру")
-async def start_game(message: Message):
-    try:
-        with open("questions.txt", "r", encoding="utf-8") as f:
-            questions = parse_questions(f.read())
-    except FileNotFoundError:
-        await message.answer("❌ Файл questions.txt не найден")
-        return
-
-    if len(questions) < MAX_QUESTIONS:
-        await message.answer("❌ В questions.txt меньше 10 вопросов")
-        return
-
-    user_sessions[message.from_user.id] = {
-        "questions": questions,
-        "current": 0,
-    }
-
-    await message.answer("🎮 Игра началась!")
-    await send_next_question(message, message.from_user.id)
-
-
-@dp.message(F.text)
-async def handle_answer(message: Message):
+@bot.message_handler(commands=["start"])
+def start(message):
     user_id = message.from_user.id
 
-    if user_id not in user_sessions:
+    user_data[user_id] = {
+        "questions": [],
+        "current": 0,
+        "score": 0
+    }
+
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("▶️ Играть")
+
+    bot.send_message(
+        message.chat.id,
+        "⚽ Привет! Готов сыграть в футбольный квиз?\n\n"
+        "📎 Отправь .txt файл с вопросами\n"
+        "▶️ Нажми «Играть», когда будешь готов",
+        reply_markup=keyboard
+    )
+
+
+@bot.message_handler(content_types=["document"])
+def handle_file(message):
+    user_id = message.from_user.id
+
+    if not message.document.file_name.endswith(".txt"):
+        bot.send_message(message.chat.id, "❌ Нужен файл .txt")
         return
 
-    await send_next_question(message, user_id)
+    file_info = bot.get_file(message.document.file_id)
+    downloaded = bot.download_file(file_info.file_path)
+
+    os.makedirs("files", exist_ok=True)
+    path = f"files/{user_id}_questions.txt"
+
+    with open(path, "wb") as f:
+        f.write(downloaded)
+
+    questions = parse_questions(path)
+
+    if len(questions) < QUESTIONS_LIMIT:
+        bot.send_message(
+            message.chat.id,
+            f"❌ В файле должно быть минимум {QUESTIONS_LIMIT} вопросов"
+        )
+        return
+
+    random.shuffle(questions)
+
+    user_data[user_id]["questions"] = questions
+
+    bot.send_message(
+        message.chat.id,
+        f"✅ Вопросы загружены: {len(questions)}"
+    )
 
 
-async def main():
-    await dp.start_polling(bot)
+@bot.message_handler(func=lambda m: m.text == "▶️ Играть")
+def play(message):
+    user_id = message.from_user.id
+
+    if user_id not in user_data or not user_data[user_id]["questions"]:
+        bot.send_message(message.chat.id, "❗ Сначала загрузи файл с вопросами")
+        return
+
+    user_data[user_id]["current"] = 0
+    user_data[user_id]["score"] = 0
+
+    send_question(message.chat.id, user_id)
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+@bot.message_handler(func=lambda m: m.text and m.text.upper() in ["A", "B", "C", "D"])
+def answer(message):
+    user_id = message.from_user.id
+
+    if user_id not in user_data:
+        bot.send_message(message.chat.id, "❗ Нажми /start")
+        return
+
+    data = user_data[user_id]
+
+    # если игра уже закончена
+    if data["current"] >= QUESTIONS_LIMIT:
+        finish_game(message.chat.id, user_id)
+        return
+
+    q = data["questions"][data["current"]]
+    correct = q["answer"]
+
+    if message.text.upper() == correct:
+        data["score"] += 1
+        bot.send_message(message.chat.id, "✅ Верно!")
+    else:
+        bot.send_message(
+            message.chat.id,
+            f"❌ Неверно! Правильный ответ: {correct}"
+        )
+
+    data["current"] += 1
+
+    # 🔴 СТРОГАЯ ОСТАНОВКА ПОСЛЕ 10
+    if data["current"] >= QUESTIONS_LIMIT:
+        finish_game(message.chat.id, user_id)
+        return
+
+    send_question(message.chat.id, user_id)
+
+
+# ---------- ЗАПУСК ----------
+
+print("Bot started")
+bot.infinity_polling()
