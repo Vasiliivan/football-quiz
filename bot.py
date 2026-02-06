@@ -3,7 +3,6 @@ from telebot import types
 import os
 import random
 
-from config import BOT_TOKEN
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
