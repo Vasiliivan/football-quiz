@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS users (
 
 conn.commit()
 
+# ================= SESSION STORAGE =================
+
+sessions = {}
+
 # ================= HELPERS =================
 
 def get_questions():
@@ -45,7 +49,8 @@ def get_questions():
     )
     return cursor.fetchall()
 
-def ask_question(message, session):
+def send_question(chat_id, user_id):
+    session = sessions[user_id]
     q = session["questions"][session["index"]]
 
     text = (
@@ -58,8 +63,7 @@ def ask_question(message, session):
         "Ответ: A / B / C / D"
     )
 
-    msg = bot.send_message(message.chat.id, text)
-    bot.register_next_step_handler(msg, handle_answer, session)
+    bot.send_message(chat_id, text)
 
 # ================= START =================
 
@@ -78,11 +82,17 @@ def start(message):
 
 @bot.message_handler(func=lambda m: m.text == "▶️ Играть")
 def play(message):
+    user_id = message.from_user.id
+
+    if user_id in sessions:
+        bot.send_message(message.chat.id, "⛔ Игра уже идёт")
+        return
+
     today = str(date.today())
 
     cursor.execute(
         "SELECT last_play_date FROM users WHERE telegram_id = ?",
-        (message.from_user.id,)
+        (user_id,)
     )
     row = cursor.fetchone()
 
@@ -95,33 +105,42 @@ def play(message):
         bot.send_message(message.chat.id, "⚠️ Недостаточно вопросов")
         return
 
-    session = {
-        "questions": questions,
-        "index": 0,
-        "score": 0,
-        "user_id": message.from_user.id
-    }
-
     cursor.execute(
         "INSERT OR IGNORE INTO users (telegram_id) VALUES (?)",
-        (message.from_user.id,)
+        (user_id,)
     )
     cursor.execute(
         "UPDATE users SET last_play_date = ? WHERE telegram_id = ?",
-        (today, message.from_user.id)
+        (today, user_id)
     )
     conn.commit()
 
-    ask_question(message, session)
+    sessions[user_id] = {
+        "questions": questions,
+        "index": 0,
+        "score": 0
+    }
 
-# ================= ANSWER =================
+    # ❗ УБИРАЕМ клавиатуру
+    bot.send_message(
+        message.chat.id,
+        "🚀 Игра началась!",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
 
-def handle_answer(message, session):
+    send_question(message.chat.id, user_id)
+
+# ================= ANSWERS =================
+
+@bot.message_handler(func=lambda m: m.from_user.id in sessions)
+def handle_answer(message):
+    user_id = message.from_user.id
+    session = sessions[user_id]
+
     answer = message.text.strip().upper()
 
     if answer not in ["A", "B", "C", "D"]:
-        msg = bot.send_message(message.chat.id, "❗ Введи A, B, C или D")
-        bot.register_next_step_handler(msg, handle_answer, session)
+        bot.send_message(message.chat.id, "❗ Введи A, B, C или D")
         return
 
     q = session["questions"][session["index"]]
@@ -130,7 +149,7 @@ def handle_answer(message, session):
         session["score"] += 1
         cursor.execute(
             "UPDATE users SET total_score = total_score + 1 WHERE telegram_id = ?",
-            (session["user_id"],)
+            (user_id,)
         )
         conn.commit()
 
@@ -142,9 +161,10 @@ def handle_answer(message, session):
             f"🏁 Игра окончена!\n\n"
             f"Правильных ответов: {session['score']} из {QUESTIONS_PER_GAME}"
         )
+        del sessions[user_id]
         return
 
-    ask_question(message, session)
+    send_question(message.chat.id, user_id)
 
 # ================= RUN =================
 
