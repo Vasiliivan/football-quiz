@@ -1,182 +1,184 @@
+import os
+import sqlite3
 import telebot
 from telebot import types
-import os
-import random
+from datetime import date
 
+# ================== CONFIG ==================
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set")
+
+QUESTIONS_PER_GAME = 10
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Храним данные пользователей
-user_data = {}
+# ================== DATABASE ==================
 
-QUESTIONS_LIMIT = 10
+conn = sqlite3.connect("quiz.db", check_same_thread=False)
+cursor = conn.cursor()
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    telegram_id INTEGER PRIMARY KEY,
+    total_score INTEGER DEFAULT 0,
+    last_play_date TEXT
+)
+""")
 
-# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT,
+    a TEXT,
+    b TEXT,
+    c TEXT,
+    d TEXT,
+    correct TEXT
+)
+""")
 
-def parse_questions(file_path):
-    questions = []
+conn.commit()
 
-    with open(file_path, "r", encoding="utf-8") as f:
-        blocks = f.read().strip().split("\n\n")
+# ================== HELPERS ==================
 
-    for block in blocks:
-        lines = block.strip().split("\n")
-        if len(lines) < 6:
-            continue
+def get_questions(limit):
+    cursor.execute("SELECT * FROM questions ORDER BY RANDOM() LIMIT ?", (limit,))
+    return cursor.fetchall()
 
-        question_text = lines[0]
-        options = lines[1:5]
-        answer_line = lines[5]
-
-        if not answer_line.upper().startswith("ANSWER:"):
-            continue
-
-        answer = answer_line.split(":")[1].strip().upper()
-
-        questions.append({
-            "text": question_text,
-            "options": options,
-            "answer": answer
-        })
-
-    return questions
-
-
-def send_question(chat_id, user_id):
-    data = user_data[user_id]
-    q = data["questions"][data["current"]]
-
-    text = f"❓ {q['text']}\n\n"
-    for opt in q["options"]:
-        text += opt + "\n"
-
-    bot.send_message(chat_id, text)
-
-
-def finish_game(chat_id, user_id):
-    score = user_data[user_id]["score"]
-    bot.send_message(
-        chat_id,
-        f"🏁 Игра окончена!\n\n"
-        f"Твой результат: {score} из {QUESTIONS_LIMIT}\n\n"
-        f"Нажми /start, чтобы сыграть снова"
+def add_user(user_id):
+    cursor.execute(
+        "INSERT OR IGNORE INTO users (telegram_id) VALUES (?)",
+        (user_id,)
     )
-    del user_data[user_id]
+    conn.commit()
 
-
-# ---------- ХЭНДЛЕРЫ ----------
+# ================== START ==================
 
 @bot.message_handler(commands=["start"])
 def start(message):
-    user_id = message.from_user.id
+    add_user(message.from_user.id)
 
-    user_data[user_id] = {
-        "questions": [],
-        "current": 0,
-        "score": 0
-    }
-
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add("▶️ Играть")
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("▶️ Играть", "➕ Загрузить вопросы", "🏆 Рейтинг")
 
     bot.send_message(
         message.chat.id,
-        "⚽ Привет! Готов сыграть в футбольный квиз?\n\n"
-        "📎 Отправь .txt файл с вопросами\n"
-        "▶️ Нажми «Играть», когда будешь готов",
-        reply_markup=keyboard
+        "⚽️ Football Quiz\n\nГотов сыграть?",
+        reply_markup=markup
     )
 
-
-@bot.message_handler(content_types=["document"])
-def handle_file(message):
-    user_id = message.from_user.id
-
-    if not message.document.file_name.endswith(".txt"):
-        bot.send_message(message.chat.id, "❌ Нужен файл .txt")
-        return
-
-    file_info = bot.get_file(message.document.file_id)
-    downloaded = bot.download_file(file_info.file_path)
-
-    os.makedirs("files", exist_ok=True)
-    path = f"files/{user_id}_questions.txt"
-
-    with open(path, "wb") as f:
-        f.write(downloaded)
-
-    questions = parse_questions(path)
-
-    if len(questions) < QUESTIONS_LIMIT:
-        bot.send_message(
-            message.chat.id,
-            f"❌ В файле должно быть минимум {QUESTIONS_LIMIT} вопросов"
-        )
-        return
-
-    random.shuffle(questions)
-
-    user_data[user_id]["questions"] = questions
-
-    bot.send_message(
-        message.chat.id,
-        f"✅ Вопросы загружены: {len(questions)}"
-    )
-
+# ================== QUIZ ==================
 
 @bot.message_handler(func=lambda m: m.text == "▶️ Играть")
-def play(message):
-    user_id = message.from_user.id
+def play_quiz(message):
+    today = str(date.today())
 
-    if user_id not in user_data or not user_data[user_id]["questions"]:
-        bot.send_message(message.chat.id, "❗ Сначала загрузи файл с вопросами")
+    cursor.execute(
+        "SELECT last_play_date FROM users WHERE telegram_id = ?",
+        (message.from_user.id,)
+    )
+    row = cursor.fetchone()
+
+    if row and row[0] == today:
+        bot.send_message(message.chat.id, "⛔ Ты уже играл сегодня")
         return
 
-    user_data[user_id]["current"] = 0
-    user_data[user_id]["score"] = 0
+    questions = get_questions(QUESTIONS_PER_GAME)
 
-    send_question(message.chat.id, user_id)
-
-
-@bot.message_handler(func=lambda m: m.text and m.text.upper() in ["A", "B", "C", "D"])
-def answer(message):
-    user_id = message.from_user.id
-
-    if user_id not in user_data:
-        bot.send_message(message.chat.id, "❗ Нажми /start")
+    if len(questions) < QUESTIONS_PER_GAME:
+        bot.send_message(message.chat.id, "⚠️ Недостаточно вопросов")
         return
 
-    data = user_data[user_id]
+    score = 0
 
-    # если игра уже закончена
-    if data["current"] >= QUESTIONS_LIMIT:
-        finish_game(message.chat.id, user_id)
-        return
-
-    q = data["questions"][data["current"]]
-    correct = q["answer"]
-
-    if message.text.upper() == correct:
-        data["score"] += 1
-        bot.send_message(message.chat.id, "✅ Верно!")
-    else:
-        bot.send_message(
-            message.chat.id,
-            f"❌ Неверно! Правильный ответ: {correct}"
+    for index, q in enumerate(questions, start=1):
+        text = (
+            f"❓ {index}/{QUESTIONS_PER_GAME}\n\n"
+            f"{q[1]}\n\n"
+            f"A) {q[2]}\n"
+            f"B) {q[3]}\n"
+            f"C) {q[4]}\n"
+            f"D) {q[5]}\n\n"
+            "Ответ: A / B / C / D"
         )
 
-    data["current"] += 1
+        msg = bot.send_message(message.chat.id, text)
+        bot.register_next_step_handler(msg, lambda m, c=q[6]: check_answer(m, c))
 
-    # 🔴 СТРОГАЯ ОСТАНОВКА ПОСЛЕ 10
-    if data["current"] >= QUESTIONS_LIMIT:
-        finish_game(message.chat.id, user_id)
-        return
+    cursor.execute(
+        "UPDATE users SET last_play_date = ? WHERE telegram_id = ?",
+        (today, message.from_user.id)
+    )
+    conn.commit()
 
-    send_question(message.chat.id, user_id)
+def check_answer(message, correct):
+    if message.text and message.text.strip().upper() == correct:
+        cursor.execute(
+            "UPDATE users SET total_score = total_score + 1 WHERE telegram_id = ?",
+            (message.from_user.id,)
+        )
+        conn.commit()
 
+# ================== LOAD QUESTIONS ==================
 
-# ---------- ЗАПУСК ----------
+@bot.message_handler(func=lambda m: m.text == "➕ Загрузить вопросы")
+def ask_file(message):
+    bot.send_message(
+        message.chat.id,
+        "📄 Отправь TXT-файл\n\nФормат:\n"
+        "Вопрос\n"
+        "A) ...\nB) ...\nC) ...\nD) ...\n"
+        "ANSWER: A"
+    )
+
+@bot.message_handler(content_types=["document"])
+def load_file(message):
+    file_info = bot.get_file(message.document.file_id)
+    downloaded = bot.download_file(file_info.file_path)
+    text = downloaded.decode("utf-8")
+
+    blocks = text.strip().split("\n\n")
+    added = 0
+
+    for block in blocks:
+        lines = block.split("\n")
+        if len(lines) < 6:
+            continue
+
+        question = lines[0]
+        a = lines[1][3:]
+        b = lines[2][3:]
+        c = lines[3][3:]
+        d = lines[4][3:]
+        correct = lines[5].replace("ANSWER:", "").strip().upper()
+
+        cursor.execute(
+            "INSERT INTO questions (text, a, b, c, d, correct) VALUES (?, ?, ?, ?, ?, ?)",
+            (question, a, b, c, d, correct)
+        )
+        added += 1
+
+    conn.commit()
+    bot.send_message(message.chat.id, f"✅ Загружено вопросов: {added}")
+
+# ================== RATING ==================
+
+@bot.message_handler(func=lambda m: m.text == "🏆 Рейтинг")
+def rating(message):
+    cursor.execute(
+        "SELECT telegram_id, total_score FROM users ORDER BY total_score DESC LIMIT 10"
+    )
+    rows = cursor.fetchall()
+
+    text = "🏆 Топ игроков:\n\n"
+    for i, r in enumerate(rows, start=1):
+        text += f"{i}. {r[0]} — {r[1]}\n"
+
+    bot.send_message(message.chat.id, text)
+
+# ================== RUN ==================
 
 print("Bot started")
 bot.infinity_polling()
