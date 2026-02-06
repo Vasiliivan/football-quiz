@@ -8,7 +8,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN)
 
 QUESTIONS_PER_GAME = 10
-user_sessions = {}
 
 # ================= DATABASE =================
 
@@ -46,8 +45,7 @@ def get_questions():
     )
     return cursor.fetchall()
 
-def send_question(chat_id):
-    session = user_sessions[chat_id]
+def ask_question(message, session):
     q = session["questions"][session["index"]]
 
     text = (
@@ -60,7 +58,8 @@ def send_question(chat_id):
         "Ответ: A / B / C / D"
     )
 
-    bot.send_message(chat_id, text)
+    msg = bot.send_message(message.chat.id, text)
+    bot.register_next_step_handler(msg, handle_answer, session)
 
 # ================= START =================
 
@@ -96,10 +95,11 @@ def play(message):
         bot.send_message(message.chat.id, "⚠️ Недостаточно вопросов")
         return
 
-    user_sessions[message.chat.id] = {
+    session = {
         "questions": questions,
         "index": 0,
-        "score": 0
+        "score": 0,
+        "user_id": message.from_user.id
     }
 
     cursor.execute(
@@ -112,25 +112,25 @@ def play(message):
     )
     conn.commit()
 
-    send_question(message.chat.id)
+    ask_question(message, session)
 
-# ================= ANSWERS =================
+# ================= ANSWER =================
 
-@bot.message_handler(func=lambda m: m.text and m.text.upper() in ["A", "B", "C", "D"])
-def answer(message):
-    chat_id = message.chat.id
+def handle_answer(message, session):
+    answer = message.text.strip().upper()
 
-    if chat_id not in user_sessions:
+    if answer not in ["A", "B", "C", "D"]:
+        msg = bot.send_message(message.chat.id, "❗ Введи A, B, C или D")
+        bot.register_next_step_handler(msg, handle_answer, session)
         return
 
-    session = user_sessions[chat_id]
     q = session["questions"][session["index"]]
 
-    if message.text.upper() == q[6]:
+    if answer == q[6]:
         session["score"] += 1
         cursor.execute(
             "UPDATE users SET total_score = total_score + 1 WHERE telegram_id = ?",
-            (message.from_user.id,)
+            (session["user_id"],)
         )
         conn.commit()
 
@@ -138,13 +138,13 @@ def answer(message):
 
     if session["index"] >= QUESTIONS_PER_GAME:
         bot.send_message(
-            chat_id,
+            message.chat.id,
             f"🏁 Игра окончена!\n\n"
             f"Правильных ответов: {session['score']} из {QUESTIONS_PER_GAME}"
         )
-        del user_sessions[chat_id]
-    else:
-        send_question(chat_id)
+        return
+
+    ask_question(message, session)
 
 # ================= RUN =================
 
