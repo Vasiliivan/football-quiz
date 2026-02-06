@@ -1,172 +1,142 @@
 import os
-import sqlite3
 import telebot
 from telebot import types
-from datetime import date
 
+# === НАСТРОЙКИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+QUESTIONS_LIMIT = 10
+
 bot = telebot.TeleBot(BOT_TOKEN)
 
-QUESTIONS_PER_GAME = 10
+# === ХРАНИЛИЩЕ СОСТОЯНИЙ ===
+questions = []
+user_state = {}   # user_id -> {"index": int, "score": int, "active": bool}
 
-# ================= DATABASE =================
+# === ЗАГРУЗКА ВОПРОСОВ ===
+def load_questions_from_file(path):
+    loaded = []
+    with open(path, "r", encoding="utf-8") as f:
+        block = []
+        for line in f:
+            line = line.strip()
+            if not line:
+                if block:
+                    loaded.append(block)
+                    block = []
+            else:
+                block.append(line)
+        if block:
+            loaded.append(block)
+    return loaded
 
-conn = sqlite3.connect("quiz.db", check_same_thread=False)
-cursor = conn.cursor()
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS questions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    text TEXT,
-    a TEXT,
-    b TEXT,
-    c TEXT,
-    d TEXT,
-    correct TEXT
-)
-""")
+# === КЛАВИАТУРА ===
+def main_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("▶️ Играть", "📂 Загрузить")
+    kb.add("🏆 Рейтинг")
+    return kb
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    telegram_id INTEGER PRIMARY KEY,
-    total_score INTEGER DEFAULT 0,
-    last_play_date TEXT
-)
-""")
 
-conn.commit()
-
-# ================= SESSION STORAGE =================
-
-sessions = {}
-
-# ================= HELPERS =================
-
-def get_questions():
-    cursor.execute(
-        "SELECT * FROM questions ORDER BY RANDOM() LIMIT ?",
-        (QUESTIONS_PER_GAME,)
-    )
-    return cursor.fetchall()
-
-def send_question(chat_id, user_id):
-    session = sessions[user_id]
-    q = session["questions"][session["index"]]
-
-    text = (
-        f"❓ {session['index'] + 1}/{QUESTIONS_PER_GAME}\n\n"
-        f"{q[1]}\n\n"
-        f"A) {q[2]}\n"
-        f"B) {q[3]}\n"
-        f"C) {q[4]}\n"
-        f"D) {q[5]}\n\n"
-        "Ответ: A / B / C / D"
-    )
-
-    bot.send_message(chat_id, text)
-
-# ================= START =================
-
+# === СТАРТ ===
 @bot.message_handler(commands=["start"])
 def start(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("▶️ Играть")
+    bot.send_message(
+        message.chat.id,
+        "⚽ Football Quiz\n\nГотов сыграть?",
+        reply_markup=main_keyboard()
+    )
+
+
+# === ЗАГРУЗКА ФАЙЛА ===
+@bot.message_handler(content_types=["document"])
+def handle_file(message):
+    global questions
+
+    file_info = bot.get_file(message.document.file_id)
+    downloaded = bot.download_file(file_info.file_path)
+
+    path = "questions.txt"
+    with open(path, "wb") as f:
+        f.write(downloaded)
+
+    questions = load_questions_from_file(path)
 
     bot.send_message(
         message.chat.id,
-        "⚽️ Football Quiz\nГотов сыграть?",
-        reply_markup=markup
+        f"✅ Загружено вопросов: {len(questions)}",
+        reply_markup=main_keyboard()
     )
 
-# ================= PLAY =================
 
+# === НАЧАЛО ИГРЫ ===
 @bot.message_handler(func=lambda m: m.text == "▶️ Играть")
 def play(message):
-    user_id = message.from_user.id
-
-    if user_id in sessions:
-        bot.send_message(message.chat.id, "⛔ Игра уже идёт")
+    if not questions:
+        bot.send_message(message.chat.id, "❌ Сначала загрузите файл с вопросами")
         return
 
-    today = str(date.today())
-
-    cursor.execute(
-        "SELECT last_play_date FROM users WHERE telegram_id = ?",
-        (user_id,)
-    )
-    row = cursor.fetchone()
-
-    if row and row[0] == today:
-        bot.send_message(message.chat.id, "⛔ Ты уже играл сегодня")
-        return
-
-    questions = get_questions()
-    if len(questions) < QUESTIONS_PER_GAME:
-        bot.send_message(message.chat.id, "⚠️ Недостаточно вопросов")
-        return
-
-    cursor.execute(
-        "INSERT OR IGNORE INTO users (telegram_id) VALUES (?)",
-        (user_id,)
-    )
-    cursor.execute(
-        "UPDATE users SET last_play_date = ? WHERE telegram_id = ?",
-        (today, user_id)
-    )
-    conn.commit()
-
-    sessions[user_id] = {
-        "questions": questions,
+    user_state[message.chat.id] = {
         "index": 0,
-        "score": 0
+        "score": 0,
+        "active": True
     }
 
-    # ❗ УБИРАЕМ клавиатуру
-    bot.send_message(
-        message.chat.id,
-        "🚀 Игра началась!",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
+    send_question(message.chat.id)
 
-    send_question(message.chat.id, user_id)
 
-# ================= ANSWERS =================
+# === ОТПРАВКА ВОПРОСА ===
+def send_question(chat_id):
+    state = user_state.get(chat_id)
 
-@bot.message_handler(func=lambda m: m.from_user.id in sessions)
-def handle_answer(message):
-    user_id = message.from_user.id
-    session = sessions[user_id]
-
-    answer = message.text.strip().upper()
-
-    if answer not in ["A", "B", "C", "D"]:
-        bot.send_message(message.chat.id, "❗ Введи A, B, C или D")
+    if not state or not state["active"]:
         return
 
-    q = session["questions"][session["index"]]
+    idx = state["index"]
 
-    if answer == q[6]:
-        session["score"] += 1
-        cursor.execute(
-            "UPDATE users SET total_score = total_score + 1 WHERE telegram_id = ?",
-            (user_id,)
+    if idx >= QUESTIONS_LIMIT or idx >= len(questions):
+        bot.send_message(
+            chat_id,
+            f"🏁 Игра окончена!\n\nПравильных ответов: {state['score']} из {QUESTIONS_LIMIT}",
+            reply_markup=main_keyboard()
         )
-        conn.commit()
+        state["active"] = False
+        return
 
-    session["index"] += 1
+    q = questions[idx]
+    text = f"❓ {idx+1}/{QUESTIONS_LIMIT}\n\n" + "\n".join(q[:-1]) + "\n\nОтвет: A / B / C / D"
+    bot.send_message(chat_id, text)
 
-    if session["index"] >= QUESTIONS_PER_GAME:
+
+# === ОБРАБОТКА ОТВЕТА ===
+@bot.message_handler(func=lambda m: m.text and m.text.upper() in ["A", "B", "C", "D"])
+def answer(message):
+    state = user_state.get(message.chat.id)
+
+    if not state or not state["active"]:
+        return
+
+    correct = questions[state["index"]][-1].strip().upper()
+
+    if message.text.upper() == correct:
+        state["score"] += 1
+        bot.send_message(message.chat.id, "✅ Верно!")
+    else:
         bot.send_message(
             message.chat.id,
-            f"🏁 Игра окончена!\n\n"
-            f"Правильных ответов: {session['score']} из {QUESTIONS_PER_GAME}"
+            f"❌ Неверно! Правильный ответ: {correct}"
         )
-        del sessions[user_id]
-        return
 
-    send_question(message.chat.id, user_id)
+    state["index"] += 1
+    send_question(message.chat.id)
 
-# ================= RUN =================
 
+# === ЗАГЛУШКА ДЛЯ РЕЙТИНГА ===
+@bot.message_handler(func=lambda m: m.text == "🏆 Рейтинг")
+def rating(message):
+    bot.send_message(message.chat.id, "🏆 Рейтинг будет добавлен позже 😉")
+
+
+# === ЗАПУСК ===
 print("Bot started")
-bot.infinity_polling()
+bot.infinity_polling(skip_pending=True)
